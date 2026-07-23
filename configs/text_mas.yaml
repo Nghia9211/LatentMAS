@@ -1,0 +1,42 @@
+# ============================================================
+# Config cho TextMAS (Token-space Multi-Agent System)
+# GPU: NVIDIA GB10 — 121.7 GB VRAM
+# ============================================================
+
+# --- Method ---
+method: "text_mas"
+
+# --- Model ---
+model_name: "Qwen/Qwen3-4B"      # hoặc Qwen/Qwen3-14B
+task: "gsm8k"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
+split: "test"
+max_samples: -1                  # -1 = toàn bộ dataset
+
+# --- Prompt architecture ---
+prompt: "sequential"              # sequential | hierarchical
+
+# We set the maximum length to 2,048 tokens for ARC-Eacy, ARC-Challenge, and GSM8K,
+# 4096 tokens for MedQA, MBPP+, and Humaneval+, 
+# 8,192 tokens for GPQA and 
+# 20,000 tokens for AIME24/25
+
+# --- Generation ---
+max_new_tokens: 2048
+temperature: 0.6
+top_p: 0.95
+seed: 42
+
+# --- Batch size ---
+generate_bs: 64
+
+# --- TextMAS specific ---
+text_mas_context_length: -1      # -1 = không giới hạn context length
+
+# --- vLLM ---
+use_vllm: true
+gpu_memory_utilization: 0.3
+tensor_parallel_size: 1
+enable_prefix_caching: true
+
+# --- Device ---
+device: "cuda"

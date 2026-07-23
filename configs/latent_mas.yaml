@@ -1,0 +1,49 @@
+# ============================================================
+# Config cho LatentMAS (Latent-space Multi-Agent System)
+# GPU: NVIDIA GB10 — 121.7 GB VRAM (đủ chạy cả 2 model trên 1 GPU)
+# ============================================================
+
+# --- Method ---
+method: "latent_mas"
+
+# --- Model ---
+model_name: "Qwen/Qwen3-4B"     # hoặc Qwen/Qwen3-4B
+task: "humanevalplus"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
+split: "test"
+max_samples: -1                  # -1 = toàn bộ dataset
+
+# --- Prompt architecture ---
+prompt: "sequential"             # sequential | hierarchical
+
+
+# We set the maximum length to 2,048 tokens for ARC-Eacy, ARC-Challenge, and GSM8K,
+# 4096 tokens for MedQA, MBPP+, and Humaneval+, 
+# 8,192 tokens for GPQA and 
+# 20,000 tokens for AIME24/25
+
+# --- Generation ---
+max_new_tokens: 4096
+temperature: 0.6
+top_p: 0.95
+seed: 42
+
+# --- Batch size ---
+# Nhỏ hơn baseline/text_mas vì cần VRAM cho cả HF model lẫn vLLM
+generate_bs: 64
+
+# --- LatentMAS specific ---
+latent_steps: 40                 # Số latent steps [0-80], tune để tối ưu accuracy
+latent_space_realign: true      # Bật nếu cần latent→embedding alignment
+think: false                     # Thêm <think> token thủ công vào prompt
+
+# --- vLLM hybrid (vLLM + HF model trên cùng 1 GPU GB10) ---
+use_vllm: true
+use_second_HF_model: true
+enable_prefix_caching: true
+gpu_memory_utilization: 0.3     # vLLM dùng ~60 GB, HF model 14B dùng ~28 GB thêm
+tensor_parallel_size: 1
+
+# --- Device ---
+# Với 1 GPU (GB10): cả 2 model cùng đặt trên cuda:0
+device: "cuda:0"
+device2: "cuda:0"               # Đổi thành cuda:1 nếu có 2 GPU
