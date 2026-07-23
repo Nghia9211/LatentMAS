@@ -421,9 +421,39 @@ class LatentMASMethod:
         results: List[Dict] = []
         for idx, item in enumerate(items):
             final_text = final_texts[idx]
-            pred = normalize_answer(extract_gsm8k_answer(final_text))
-            gold = item["gold"]
-            ok = (pred == gold) if (pred and gold) else False
+            if self.task in ['mbppplus', 'humanevalplus']:
+                pred = extract_markdown_python_block(final_text)
+                gold = item.get("gold", "")
+
+                if pred is None:
+                    ok = False
+                    error_msg = "python error: No python code block found"
+                else:
+                    python_code_to_exe = pred + "\n" + gold
+                    ok, error_msg = run_with_timeout(python_code_to_exe, timeout=10)
+
+                print(f'=========================================')
+                print(f'Question {idx}')
+                print(f'error_msg: {error_msg}')
+
+            elif self.task in ["aime2024", "aime2025"]:
+                pred = normalize_answer(extract_gsm8k_answer(final_text))
+                gold = str(item.get("gold", "")).strip()
+                try:
+                    pred_int = int(pred)
+                    gold_int = int(gold)
+                    ok = (pred_int == gold_int)
+                    error_msg = None
+                except ValueError:
+                    ok = False
+                    error_msg = f'Value error in parsing answer. Pred: {pred}, Gold: {gold}'
+
+            else:
+                pred = normalize_answer(extract_gsm8k_answer(final_text))
+                gold = item.get("gold", "")
+                ok = (pred == gold) if (pred and gold) else False
+                error_msg = None
+
             results.append(
                 {
                     "question": item["question"],
