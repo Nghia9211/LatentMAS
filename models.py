@@ -20,11 +20,18 @@ def _ensure_pad_token(tokenizer: AutoTokenizer) -> None:
             tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
 
-def _past_length(past_key_values: Optional[Tuple]) -> int:
+def _past_length(past_key_values) -> int:
+    if past_key_values is None:
+        return 0
+    # Transformers >= 4.38: DynamicCache / Cache object
+    if hasattr(past_key_values, "get_seq_length"):
+        return past_key_values.get_seq_length()
+    # Fallback: legacy tuple-of-tuples format  (transformers < 4.38)
     if not past_key_values:
         return 0
     k = past_key_values[0][0]
     return k.shape[-2]
+
 
 
 class ModelWrapper:
@@ -46,8 +53,14 @@ class ModelWrapper:
             gpu_util = float(getattr(args, "gpu_memory_utilization", 0.9))
             
             print(f"[vLLM] Using vLLM backend for model {model_name}")
-            if args.enable_prefix_caching and args.method == "latent_mas": 
+            use_prefix_caching = bool(getattr(args, "enable_prefix_caching", False))
+            is_latent_mas = getattr(args, "method", "") == "latent_mas"
+            if is_latent_mas and use_prefix_caching:
+                # latent_mas needs prompt embeds support in addition to prefix caching
                 self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=True, enable_prompt_embeds=True)
+            elif use_prefix_caching:
+                # baseline / text_mas: prefix caching only (no prompt embeds needed)
+                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=True)
             else:
                 self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util)
             self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
@@ -176,7 +189,7 @@ class ModelWrapper:
         realign_matrix = torch.linalg.solve(gram, rhs)
         target_norm = input_weight.norm(dim=1).mean().detach()
 
-        if self.args.latent_space_realign:
+        if getattr(self.args, "latent_space_realign", False):
             pass
         else:
             # keep the matrix, for further normalization
@@ -228,15 +241,8 @@ class ModelWrapper:
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, device=self.device)
         prompt_lengths = attention_mask.sum(dim=1).tolist()
-        cache_position = None
         if past_key_values is not None:
             past_len = _past_length(past_key_values)
-            cache_position = torch.arange(
-                past_len,
-                past_len + input_ids.shape[-1],
-                dtype=torch.long,
-                device=self.device,
-            )
             if past_len > 0:
                 past_mask = torch.ones(
                     (attention_mask.shape[0], past_len),
@@ -255,7 +261,6 @@ class ModelWrapper:
             return_dict_in_generate=True,
             output_scores=False,
             past_key_values=past_key_values,
-            cache_position=cache_position,
         )
         sequences = outputs.sequences
         generations: List[str] = []
@@ -310,8 +315,16 @@ class ModelWrapper:
         )
         past = outputs.past_key_values
 
-        e_t = outputs.hidden_states[0][:, -1, :]          # [B, D]
-        last_hidden = outputs.hidden_states[-1][:, -1, :] # [B, D]
+        if past_key_values is None:
+            # Right-padded batch: select last real (non-pad) token per sample
+            last_token_idx = attention_mask.sum(1).long() - 1  # [B]
+            batch_idx = torch.arange(input_ids.shape[0], device=input_ids.device)
+            e_t = outputs.hidden_states[0][batch_idx, last_token_idx, :]           # [B, D]
+            last_hidden = outputs.hidden_states[-1][batch_idx, last_token_idx, :]  # [B, D]
+        else:
+            # Incremental step: single new token, no padding
+            e_t = outputs.hidden_states[0][:, -1, :]           # [B, D]
+            last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
         h_t = last_hidden.detach().clone()
 
         e_t_plus_1 = None
@@ -360,10 +373,11 @@ class ModelWrapper:
     ) -> Tuple:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
+        device_for_attention = getattr(self, "HF_device", self.device)
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, device=self.HF_device)
+            attention_mask = torch.ones_like(input_ids, device=device_for_attention)
         else:
-            attention_mask = attention_mask.to(self.HF_device)
+            attention_mask = attention_mask.to(device_for_attention)
         if past_key_values is not None:
             past_len = _past_length(past_key_values)
             if past_len > 0:
@@ -382,10 +396,20 @@ class ModelWrapper:
             return_dict=True,
         )
         past = outputs.past_key_values
-        last_hidden = outputs.hidden_states[-1][:, -1, :]
-        
-        curr_output_embedding = [] 
-        curr_output_embedding.append(outputs.hidden_states[0])  # input embedding
+
+        curr_output_embedding = []
+        if past_key_values is None:
+            # Right-padded batch: select last real token per sample
+            last_token_idx = attention_mask.sum(1).long() - 1  # [B]
+            batch_idx = torch.arange(input_ids.shape[0], device=input_ids.device)
+            last_hidden = outputs.hidden_states[-1][batch_idx, last_token_idx, :]  # [B, D]
+            # Trim padding from initial embedding before passing to vLLM prompt embeds
+            max_real_len = int((last_token_idx + 1).max().item())
+            curr_output_embedding.append(outputs.hidden_states[0][:, :max_real_len, :])
+        else:
+            # Incremental step: no padding
+            last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
+            curr_output_embedding.append(outputs.hidden_states[0])  # input embedding
         
         
         for _ in range(latent_steps):

@@ -1,6 +1,15 @@
 import argparse
 import json
+import os
+import sys
+from datetime import datetime
 from typing import Dict, List, Tuple
+
+try:
+    import yaml
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
 
 from tqdm import tqdm
 
@@ -29,7 +38,45 @@ def evaluate(preds: List[Dict]) -> Tuple[float, int]:
     acc = correct / total if total > 0 else 0.0
     return acc, correct
 
-# Main processing function for each batch
+
+def save_results(preds: List[Dict], summary: Dict, args: argparse.Namespace) -> str:
+    os.makedirs("output", exist_ok=True)
+
+    model_short = args.model_name.replace("/", "_")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"{args.method}_{model_short}_{args.task}_{timestamp}"
+
+    json_path = os.path.join("output", f"{base_name}.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump({"summary": summary, "predictions": preds}, f, ensure_ascii=False, indent=2)
+
+    txt_path = os.path.join("output", f"{base_name}_summary.txt")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("=" * 60 + "\n")
+        f.write("           EXPERIMENT RESULTS SUMMARY\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Method         : {summary['method']}\n")
+        f.write(f"Model          : {summary['model']}\n")
+        f.write(f"Task           : {summary['task']}\n")
+        f.write(f"Split          : {summary['split']}\n")
+        f.write(f"Seed           : {summary['seed']}\n")
+        f.write(f"Max samples    : {summary['max_samples']}\n")
+        f.write(f"Correct        : {summary['correct']} / {summary['max_samples']}\n")
+        f.write(f"Accuracy       : {summary['accuracy']:.4f} ({summary['accuracy']*100:.2f}%)\n")
+        f.write(f"Total time     : {summary['total_time_sec']} sec\n")
+        f.write(f"Time/sample    : {summary['time_per_sample_sec']} sec\n")
+        f.write("\n" + "-" * 60 + "\n")
+        f.write("Per-sample results:\n")
+        f.write("-" * 60 + "\n")
+        for i, pred in enumerate(preds, 1):
+            status = "✓" if pred.get("correct") else "✗"
+            f.write(f"[{i:4d}] {status}  Pred: {pred.get('prediction', '')}  |  Gold: {pred.get('gold', '')}\n")
+
+    print(f"\n[Output] Predictions saved  -> {json_path}")
+    print(f"[Output] Summary saved      -> {txt_path}")
+    return base_name
+
+
 def process_batch(
     method,
     batch: List[Dict],
@@ -81,40 +128,95 @@ def process_batch(
     return processed, preds
 
 
+def _load_yaml_config(path: str) -> dict:
+    """Đọc file YAML và trả về dict config."""
+    if not _HAS_YAML:
+        print("[WARNING] pyyaml chưa được cài. Chạy: pip install pyyaml")
+        sys.exit(1)
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    print(f"[Config] Đã đọc config từ: {path}")
+    return cfg
+
+
 def main():
-    parser = argparse.ArgumentParser()
+    # --- Bước 1: parse --config trước để lấy YAML defaults ---
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=str, default=None,
+                            help="Đường dẫn tới file YAML config (vd: configs/baseline.yaml)")
+    pre_args, remaining_argv = pre_parser.parse_known_args()
+
+    yaml_defaults: dict = {}
+    if pre_args.config:
+        yaml_defaults = _load_yaml_config(pre_args.config)
+
+    # --- Bước 2: build parser chính với defaults từ YAML ---
+    parser = argparse.ArgumentParser(
+        description="LatentMAS experiment runner",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--config", type=str, default=None,
+                        help="Đường dẫn tới file YAML config")
 
     # core args for experiments
-    parser.add_argument("--method", choices=["baseline", "text_mas", "latent_mas"], required=True,
+    parser.add_argument("--method", choices=["baseline", "text_mas", "latent_mas"],
+                        default=yaml_defaults.get("method", None), required=("method" not in yaml_defaults),
                         help="Which multi-agent method to run: 'baseline', 'text_mas', or 'latent_mas'.")
-    parser.add_argument("--model_name", type=str, required=True,
-                        choices=["Qwen/Qwen3-4B", "Qwen/Qwen3-4B", "Qwen/Qwen3-14B"],
+    parser.add_argument("--model_name", type=str,
+                        choices=["Qwen/Qwen3-4B", "Qwen/Qwen3-14B"],
+                        default=yaml_defaults.get("model_name", None), required=("model_name" not in yaml_defaults),
                         help="Model choices to use for experiments (e.g. 'Qwen/Qwen3-14B').")
-    parser.add_argument("--max_samples", type=int, default=-1, help="Number of questions to evaluate; set -1 to use all samples.")
-    parser.add_argument("--task", choices=["gsm8k", "aime2024", "aime2025", "gpqa", "arc_easy", "arc_challenge", "mbppplus", 'humanevalplus', 'medqa'], default="gsm8k",
-                        help="Dataset/task to evaluate. Controls which loader is used.")
-    parser.add_argument("--prompt", type=str, choices=["sequential", "hierarchical"], default="sequential", help="Multi-agent system architecture: 'sequential' or 'hierarchical'.")
+    parser.add_argument("--max_samples", type=int,
+                        default=yaml_defaults.get("max_samples", -1),
+                        help="Number of questions to evaluate; set -1 to use all samples.")
+    parser.add_argument("--task",
+                        choices=["gsm8k", "aime2024", "aime2025", "gpqa", "arc_easy", "arc_challenge", "mbppplus", "humanevalplus", "medqa"],
+                        default=yaml_defaults.get("task", "gsm8k"),
+                        help="Dataset/task to evaluate.")
+    parser.add_argument("--prompt", type=str, choices=["sequential", "hierarchical"],
+                        default=yaml_defaults.get("prompt", "sequential"),
+                        help="Multi-agent system architecture.")
+
+    parser.add_argument("--num_agents", type=int, choices=[2, 4],
+                        default=yaml_defaults.get("num_agents", 2),
+                        help="LatentMAS agents: 2 = Planner/Judger; 4 = original pipeline")
 
     # other args
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--split", type=str, default="test")
-    parser.add_argument("--max_new_tokens", type=int, default=4096)
-    parser.add_argument("--latent_steps", type=int, default=0, help="Number of latent steps for LatentMAS method")
-    parser.add_argument("--temperature", type=float, default=0.6)
-    parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--generate_bs", type=int, default=20, help="Batch size for generation")
-    parser.add_argument("--text_mas_context_length", type=int, default=-1, help="TextMAS context length limit")
-    parser.add_argument("--think", action="store_true", help="Manually add think token in the prompt for LatentMAS")
-    parser.add_argument("--latent_space_realign", action="store_true")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default=yaml_defaults.get("device", "cuda"))
+    parser.add_argument("--split", type=str, default=yaml_defaults.get("split", "test"))
+    parser.add_argument("--max_new_tokens", type=int, default=yaml_defaults.get("max_new_tokens", 4096))
+    parser.add_argument("--latent_steps", type=int, default=yaml_defaults.get("latent_steps", 0),
+                        help="Number of latent steps for LatentMAS method")
+    parser.add_argument("--temperature", type=float, default=yaml_defaults.get("temperature", 0.6))
+    parser.add_argument("--top_p", type=float, default=yaml_defaults.get("top_p", 0.95))
+    parser.add_argument("--generate_bs", type=int, default=yaml_defaults.get("generate_bs", 20),
+                        help="Batch size for generation")
+    parser.add_argument("--text_mas_context_length", type=int,
+                        default=yaml_defaults.get("text_mas_context_length", -1),
+                        help="TextMAS context length limit")
+    parser.add_argument("--think", action="store_true", default=yaml_defaults.get("think", False),
+                        help="Manually add think token in the prompt for LatentMAS")
+    parser.add_argument("--latent_space_realign", action="store_true",
+                        default=yaml_defaults.get("latent_space_realign", False))
+    parser.add_argument("--seed", type=int, default=yaml_defaults.get("seed", 42))
 
     # vLLM support
-    parser.add_argument("--use_vllm", action="store_true", help="Use vLLM backend for generation")
-    parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching in vLLM for latent_mas")
-    parser.add_argument("--use_second_HF_model", action="store_true", help="Use a second HF model for latent generation in latent_mas")
-    parser.add_argument("--device2", type=str, default="cuda:1")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="How many GPUs vLLM should shard the model across")
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.9, help="Target GPU memory utilization for vLLM")
+    parser.add_argument("--use_vllm", action="store_true",
+                        default=yaml_defaults.get("use_vllm", False),
+                        help="Use vLLM backend for generation")
+    parser.add_argument("--enable_prefix_caching", action="store_true",
+                        default=yaml_defaults.get("enable_prefix_caching", False),
+                        help="Enable prefix caching in vLLM")
+    parser.add_argument("--use_second_HF_model", action="store_true",
+                        default=yaml_defaults.get("use_second_HF_model", False),
+                        help="Use a second HF model for latent generation in latent_mas")
+    parser.add_argument("--device2", type=str, default=yaml_defaults.get("device2", "cuda:1"))
+    parser.add_argument("--tensor_parallel_size", type=int,
+                        default=yaml_defaults.get("tensor_parallel_size", 1),
+                        help="How many GPUs vLLM should shard the model across")
+    parser.add_argument("--gpu_memory_utilization", type=float,
+                        default=yaml_defaults.get("gpu_memory_utilization", 0.3),
+                        help="Target GPU memory utilization for vLLM")
 
     args = parser.parse_args()
     
@@ -226,24 +328,27 @@ def main():
     total_time = time.time() - start_time
 
     acc, correct = evaluate(preds)
-    
-    # Load results in JSON format
-    print(
-        json.dumps(
-            {
-                "method": args.method,
-                "model": args.model_name,
-                "split": args.split,
-                "seed": args.seed,
-                "max_samples": args.max_samples,
-                "accuracy": acc,
-                "correct": correct,
-                "total_time_sec": round(total_time,4),
-                "time_per_sample_sec": round(total_time / args.max_samples, 4),
-            },
-            ensure_ascii=False,
-        )
-    )
+
+    summary = {
+        "method": args.method,
+        "num_agents": len(method.agents) if hasattr(method, "agents") else 1,
+        "model": args.model_name,
+        "task": args.task,
+        "split": args.split,
+        "seed": args.seed,
+        "max_samples": args.max_samples,
+        "accuracy": acc,
+        "correct": correct,
+        "total_time_sec": round(total_time, 4),
+        "time_per_sample_sec": round(total_time / args.max_samples, 4),
+    }
+
+    # In kết quả ra terminal
+    print(json.dumps(summary, ensure_ascii=False))
+
+    # Lưu kết quả vào folder output/
+    save_results(preds, summary, args)
+
 
 
 

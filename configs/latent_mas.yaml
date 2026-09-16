@@ -5,10 +5,11 @@
 
 # --- Method ---
 method: "latent_mas"
+num_agents: 2                   # Planner (latent) -> Judger (text)
 
 # --- Model ---
 model_name: "Qwen/Qwen3-4B"     # hoặc Qwen/Qwen3-4B
-task: "humanevalplus"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
+task: "medqa"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
 split: "test"
 max_samples: -1                  # -1 = toàn bộ dataset
 
@@ -28,11 +29,12 @@ top_p: 0.95
 seed: 42
 
 # --- Batch size ---
-# Nhỏ hơn baseline/text_mas vì cần VRAM cho cả HF model lẫn vLLM
+# HF backend không có paged attention → batch nhỏ để tránh OOM
+# vLLM: có thể dùng 32-64, HF: dùng 1-4
 generate_bs: 64
 
 # --- LatentMAS specific ---
-latent_steps: 40                 # Số latent steps [0-80], tune để tối ưu accuracy
+latent_steps: 20                # Số latent steps [0-80], tune để tối ưu accuracy
 latent_space_realign: true      # Bật nếu cần latent→embedding alignment
 think: false                     # Thêm <think> token thủ công vào prompt
 

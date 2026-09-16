@@ -33,7 +33,7 @@ class LatentMASMethod:
         self.temperature = temperature
         self.top_p = top_p
         self.generate_bs = max(1, generate_bs)
-        self.agents = default_agents()
+        self.agents = default_agents(getattr(args, "num_agents", 2))
         self.method_name = 'latent_mas'
         self.vllm_device = args.device 
         self.HF_device = args.device2
@@ -352,7 +352,8 @@ class LatentMASMethod:
                 ) 
                 judger_encoded = judger_encoded["input_ids"].to(self.model.HF_device)
                 # Get current prompt embedding
-                curr_prompt_emb = self.model.embedding_layer(judger_encoded).squeeze(0).to(self.vllm_device)
+                # Keep [batch, sequence, hidden], including when batch == 1.
+                curr_prompt_emb = self.model.embedding_layer(judger_encoded).to(self.vllm_device)
                 
                 # assert Qwen model
                 assert "Qwen" in self.args.model_name or "qwen" in self.args.model_name, "latent_embedding_position is only supported for Qwen models currently."

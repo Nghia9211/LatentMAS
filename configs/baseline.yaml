@@ -8,7 +8,7 @@ method: "baseline"
 
 # --- Model ---
 model_name: "Qwen/Qwen3-4B"      # hoặc Qwen/Qwen3-14B
-task: "gsm8k"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
+task: "mbppplus"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
 split: "test"
 max_samples: -1                  # -1 = toàn bộ dataset
 
@@ -19,7 +19,7 @@ max_samples: -1                  # -1 = toàn bộ dataset
 # 20,000 tokens for AIME24/25
 
 # --- Generation ---
-max_new_tokens: 2048
+max_new_tokens: 4096
 temperature: 0.6
 top_p: 0.95
 seed: 42
