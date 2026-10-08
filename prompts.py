@@ -1,3 +1,7 @@
+def _text_context(context, args):
+    """A negative context limit means unlimited (length is in characters)."""
+    limit = args.text_mas_context_length
+    return context if limit < 0 else context[:limit]
 
 def build_agent_message_sequential_latent_mas(role: str, question: str, context: str = "", method=None, args=None):
 
@@ -346,7 +350,7 @@ def build_agent_messages_sequential_text_mas(role: str, question: str, context: 
     assert "qwen" in args.model_name.lower(), "only for qwen models"
 
     # truncate context if needed
-    ctx = context[: args.text_mas_context_length]
+    ctx = _text_context(context, args)
 
     if role == "planner":
         user_content = f"""
@@ -547,7 +551,7 @@ Your response:
 You are a task summarizer. Given the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
 
 Content from Previous Agent:
-{context[:args.text_mas_context_length]}
+{_text_context(context, args)}
 
 Input Question: {question}
 
@@ -587,7 +591,7 @@ Your response:
 You are a task summarizer. Given the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
 
 Content from Previous Agent:
-{context[:args.text_mas_context_length]}
+{_text_context(context, args)}
 
 Input Question: {question}
 
@@ -634,7 +638,7 @@ Your response:
 You are a task summarizer. Given the final answer in markdown python code block.
 
 Content from Previous Agent:
-{context[:args.text_mas_context_length]}
+{_text_context(context, args)}
 
 Input Question: {question}
 
@@ -676,7 +680,7 @@ Your response:
 You are a task summarizer. Given the input question and responses from previous agents as reference, reason step-by-step and put the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
 
 Content from Previous Agent:
-{context[:args.text_mas_context_length]}
+{_text_context(context, args)}
 
 "Your final answer must be selected from 1 and 2. For example \\boxed{{1}} or \\boxed{{2}}. Do not add any other contents inside the box."
 
@@ -763,4 +767,3 @@ Present your reasoning, and then clearly state your final answer at the end.
         {"role": "system", "content": system_message},
         {"role": "user", "content": user_content},
     ]
-

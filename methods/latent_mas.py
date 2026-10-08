@@ -6,7 +6,13 @@ from prompts import build_agent_message_sequential_latent_mas, build_agent_messa
 from utils import extract_gsm8k_answer, normalize_answer, extract_markdown_python_block, run_with_timeout
 import torch
 import argparse
-from vllm import SamplingParams
+try:
+    from vllm import SamplingParams
+except ImportError:
+    SamplingParams = None
+from latent_batch import insert_prefix
+from utils import medqa_scoring_metadata
+import time
 import pdb
 
 try:
@@ -47,7 +53,8 @@ class LatentMASMethod:
             temperature=temperature,
             top_p=top_p,
             max_tokens=args.max_new_tokens,
-        )
+            seed=int(getattr(args, "seed", 42)),
+        ) if SamplingParams is not None else None
         self.task = args.task
 
     @staticmethod
@@ -62,12 +69,20 @@ class LatentMASMethod:
         if past_kv is None or tokens_to_keep <= 0:
             return None
         if Cache is not None and isinstance(past_kv, Cache):
-            legacy = past_kv.to_legacy_cache()
-            trimmed_legacy = tuple(
-                tuple(self._slice_tensor(t, tokens_to_keep) for t in layer)
-                for layer in legacy
-            )
-            return past_kv.__class__.from_legacy_cache(trimmed_legacy)
+            from transformers.cache_utils import DynamicCache
+            trimmed = DynamicCache()
+            if hasattr(past_kv, "layers"):
+                layers = [(layer.keys, layer.values) for layer in past_kv.layers]
+            else:
+                layers = past_kv.to_legacy_cache()
+            for i, (key, value) in enumerate(layers):
+                trimmed.update(self._slice_tensor(key, tokens_to_keep),
+                               self._slice_tensor(value, tokens_to_keep), i)
+            mask = getattr(past_kv, "_latent_attention_mask", None)
+            if mask is not None:
+                trimmed._latent_attention_mask = mask[:, -tokens_to_keep:]
+                trimmed._latent_next_position = past_kv._latent_next_position
+            return trimmed
         trimmed_layers = []
         for layer in past_kv:
             if isinstance(layer, tuple):
@@ -80,6 +95,8 @@ class LatentMASMethod:
 
     @torch.no_grad()
     def run_batch(self, items: List[Dict]) -> List[Dict]:
+        if not items:
+            return []
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
 
@@ -225,7 +242,7 @@ class LatentMASMethod:
                     gold_int = int(gold)
                     ok = (pred_int == gold_int)
                     error_msg = None
-                except ValueError:
+                except (TypeError, ValueError):
                     ok = False
                     error_msg = f'Value error in parsing answer. Pred: {pred}, Gold: {gold}'
 
@@ -244,11 +261,19 @@ class LatentMASMethod:
                     "raw_prediction": final_text,
                     "agents": agent_traces[idx],
                     "correct": ok,
+                    "evaluation_error": error_msg,
+                    **(medqa_scoring_metadata(final_text, gold, pred, ok)
+                       if self.task == "medqa" else {}),
                 }
             )
         return results
     
+    @torch.no_grad()
     def run_batch_vllm(self, items: List[Dict]) -> List[Dict]:
+        if not items:
+            return []
+        if self.sampling_params is None:
+            raise RuntimeError('vLLM is required for run_batch_vllm')
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
 
@@ -258,6 +283,9 @@ class LatentMASMethod:
         final_texts = ["" for _ in range(batch_size)]
 
         embedding_record = []
+        generation_metadata = [{} for _ in items]
+        rollout_seconds = 0.0
+        generation_seconds = 0.0
         for agent in self.agents:
             
             if self.args.prompt == "sequential":
@@ -297,12 +325,16 @@ class LatentMASMethod:
                     active_ids = ids_row[mask_row.bool()].tolist()
                     wrapped_tokens_batch.append(self.model.tokenizer.convert_ids_to_tokens(active_ids))
 
+                torch.cuda.synchronize() if torch.cuda.is_available() else None
+                stage_start = time.perf_counter()
                 past_kv, previous_hidden_embedding = self.model.generate_latent_batch_hidden_state(
                     wrapped_ids,
                     attention_mask=wrapped_mask,
                     latent_steps=self.latent_steps,
                     past_key_values=past_kv,
                 )
+                torch.cuda.synchronize() if torch.cuda.is_available() else None
+                rollout_seconds += time.perf_counter() - stage_start
                 if self.sequential_info_only or self.latent_only:
                     new_past_len = _past_length(past_kv)
                     tokens_added = new_past_len - prev_past_len
@@ -311,9 +343,9 @@ class LatentMASMethod:
 
                 if self.latent_only:
                     if self.latent_steps > 0:
-                        previous_hidden_embedding = previous_hidden_embedding[:, -self.latent_steps:, :]
+                        previous_hidden_embedding = [emb[-self.latent_steps:] for emb in previous_hidden_embedding]
                     else:
-                        previous_hidden_embedding = previous_hidden_embedding[:, 0:0, :]
+                        previous_hidden_embedding = [emb[:0] for emb in previous_hidden_embedding]
 
                 embedding_record.append(previous_hidden_embedding)
 
@@ -336,8 +368,9 @@ class LatentMASMethod:
                     )
             else:
                 
-                # A stack of [B, L_i, H]
-                past_embedding = torch.cat(embedding_record, dim=1).to(self.vllm_device)
+                # One unpadded prefix per sample; lengths may differ.
+                past_embedding = [torch.cat([record[i] for record in embedding_record], dim=0)
+                                  for i in range(batch_size)]
                 
                 if self.args.think:
                     judger_prompts = [f"{prompt}<think>" for prompt in prompts]
@@ -350,6 +383,7 @@ class LatentMASMethod:
                     padding=True,
                     add_special_tokens=False,
                 ) 
+                judger_mask = judger_encoded["attention_mask"]
                 judger_encoded = judger_encoded["input_ids"].to(self.model.HF_device)
                 # Get current prompt embedding
                 # Keep [batch, sequence, hidden], including when batch == 1.
@@ -362,48 +396,30 @@ class LatentMASMethod:
                 len_of_left = []
                 for p in judger_prompts:
                     idx = p.find("<|im_start|>user\n")
+                    if idx < 0:
+                        raise ValueError("Qwen user marker not found in judger prompt")
                     # Get the text up to and including "<|im_start|>user\n"
                     left = p[: idx + len("<|im_start|>user\n")]
-                    len_of_left.append(len(self.model.tokenizer(left)['input_ids']))
+                    len_of_left.append(len(self.model.tokenizer(left, add_special_tokens=False)['input_ids']))
                     
-                B, L, H = curr_prompt_emb.shape
-                _, Lp, H = past_embedding.shape  # assume shape consistency
-                    
-                whole_prompt_emb_list = []
-                for i in range(B):
-                    insert_idx = len_of_left[i]
-                    left_emb = curr_prompt_emb[i, :insert_idx, :]
-                    right_emb = curr_prompt_emb[i, insert_idx:, :]
-                    combined = torch.cat([left_emb, past_embedding[i], right_emb], dim=0)
-                    whole_prompt_emb_list.append(combined)
-
-                # Pad back to max length if needed
-                max_len = max(x.shape[0] for x in whole_prompt_emb_list)
-                whole_prompt_emb = torch.stack([
-                    torch.cat([x, torch.zeros(max_len - x.shape[0], H, device=x.device)], dim=0)
-                    for x in whole_prompt_emb_list
-                ])
-
-                # else:
-                    # Get full prompt embedding from cat with previous ones 
-                    # B L H B L H
-                    # whole_prompt_emb = torch.cat([past_embedding, curr_prompt_emb], dim=1)
-                
-                # pdb.set_trace()              
-                
-                # Use vLLM 
-                prompt_embeds_list = [
-                    {
-                        "prompt_embeds": embeds
-                    } for embeds in whole_prompt_emb 
-                ]
-                
-                
+                prompt_embeds_list = insert_prefix(
+                    curr_prompt_emb, judger_mask, past_embedding, len_of_left)
+                stage_start = time.perf_counter()
                 outputs = self.model.vllm_engine.generate(
                     prompt_embeds_list,
                     self.sampling_params,
                 )
 
+                generation_seconds = time.perf_counter() - stage_start
+                for i, out in enumerate(outputs):
+                    completion = out.outputs[0]
+                    generation_metadata[i] = {
+                        "output_token_ids": list(completion.token_ids),
+                        "generated_tokens": len(completion.token_ids),
+                        "finish_reason": completion.finish_reason,
+                        "stop_reason": completion.stop_reason,
+                        "prompt_embedding_tokens": len(prompt_embeds_list[i]["prompt_embeds"]),
+                    }
                 generated_texts = [out.outputs[0].text.strip() for out in outputs]
                     
                 for idx in range(batch_size):
@@ -445,7 +461,7 @@ class LatentMASMethod:
                     gold_int = int(gold)
                     ok = (pred_int == gold_int)
                     error_msg = None
-                except ValueError:
+                except (TypeError, ValueError):
                     ok = False
                     error_msg = f'Value error in parsing answer. Pred: {pred}, Gold: {gold}'
 
@@ -464,9 +480,17 @@ class LatentMASMethod:
                     "raw_prediction": final_text,
                     "agents": agent_traces[idx],
                     "correct": ok,
+                    "evaluation_error": error_msg,
+                    "generation": generation_metadata[idx],
+                    "batch_timing": {"batch_size": batch_size,
+                                     "hf_rollout_seconds": rollout_seconds,
+                                     "vllm_generation_seconds": generation_seconds},
+                    **(medqa_scoring_metadata(final_text, gold, pred, ok)
+                       if self.task == "medqa" else {}),
                 }
             )
         return results
 
     def run_item(self, item: Dict) -> Dict:
-        return self.run_batch([item])[0]
+        runner = self.run_batch_vllm if getattr(self.model, 'use_vllm', False) else self.run_batch
+        return runner([item])[0]

@@ -8,7 +8,7 @@ method: "baseline"
 
 # --- Model ---
 model_name: "Qwen/Qwen3-4B"      # hoặc Qwen/Qwen3-14B
-task: "mbppplus"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
+task: "medqa"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
 split: "test"
 max_samples: -1                  # -1 = toàn bộ dataset
 
@@ -25,7 +25,7 @@ top_p: 0.95
 seed: 42
 
 # --- Batch size ---
-generate_bs: 64           
+generate_bs: 16           
 
 # --- vLLM ---
 use_vllm: true

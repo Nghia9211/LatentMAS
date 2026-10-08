@@ -8,12 +8,13 @@ method: "text_mas"
 
 # --- Model ---
 model_name: "Qwen/Qwen3-4B"      # hoặc Qwen/Qwen3-14B
-task: "gsm8k"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
+task: "medqa"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
 split: "test"
 max_samples: -1                  # -1 = toàn bộ dataset
 
 # --- Prompt architecture ---
 prompt: "sequential"              # sequential | hierarchical
+num_agents: 2                     # Planner -> Judger
 
 # We set the maximum length to 2,048 tokens for ARC-Eacy, ARC-Challenge, and GSM8K,
 # 4096 tokens for MedQA, MBPP+, and Humaneval+, 
@@ -21,13 +22,13 @@ prompt: "sequential"              # sequential | hierarchical
 # 20,000 tokens for AIME24/25
 
 # --- Generation ---
-max_new_tokens: 2048
+max_new_tokens: 4096
 temperature: 0.6
 top_p: 0.95
 seed: 42
 
 # --- Batch size ---
-generate_bs: 64
+generate_bs: 16
 
 # --- TextMAS specific ---
 text_mas_context_length: -1      # -1 = không giới hạn context length

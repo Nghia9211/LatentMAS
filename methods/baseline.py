@@ -3,6 +3,7 @@ from typing import Dict, List
 from models import ModelWrapper
 from prompts import build_agent_messages_single_agent
 from utils import extract_gsm8k_answer, normalize_answer, extract_markdown_python_block, run_with_timeout
+from utils import medqa_scoring_metadata
 
 
 class BaselineMethod:
@@ -28,6 +29,8 @@ class BaselineMethod:
         self.task = args.task
 
     def run_batch(self, items: List[Dict]) -> List[Dict]:
+        if not items:
+            return []
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
         batch_messages = [
@@ -83,7 +86,7 @@ class BaselineMethod:
                     gold_int = int(gold)
                     ok = (pred_int == gold_int)
                     error_msg = None
-                except ValueError:
+                except (TypeError, ValueError):
                     ok = False
                     error_msg = f'Value error in parsing answer. Pred: {pred}, Gold: {gold}'
 
@@ -112,6 +115,9 @@ class BaselineMethod:
                     "raw_prediction": generated_text,
                     "agents": [agent_trace],
                     "correct": ok,
+                    "evaluation_error": error_msg,
+                    **(medqa_scoring_metadata(generated_text, gold, pred, ok)
+                       if self.task == 'medqa' else {}),
                 }
             )
         return results

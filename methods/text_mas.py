@@ -5,6 +5,7 @@ from models import ModelWrapper
 # from prompts import build_agent_messages, build_agent_messages_v6, build_agent_messages_v6_text_mas
 from prompts import build_agent_messages_hierarchical_text_mas, build_agent_messages_sequential_text_mas
 from utils import extract_gsm8k_answer, normalize_answer, extract_markdown_python_block, run_with_timeout
+from utils import medqa_scoring_metadata
 import argparse
 import pdb
 
@@ -25,12 +26,14 @@ class TextMASMethod:
         self.temperature = temperature
         self.top_p = top_p
         self.generate_bs = max(1, generate_bs)
-        self.agents = default_agents()
+        self.agents = default_agents(getattr(args, "num_agents", 2))
         self.args = args
         self.method_name = "text_mas"
         self.task = args.task
         
     def run_batch(self, items: List[Dict]) -> List[Dict]:
+        if not items:
+            return []
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
 
@@ -152,7 +155,7 @@ class TextMASMethod:
                     gold_int = int(gold)
                     ok = (pred_int == gold_int)
                     error_msg = None
-                except ValueError:
+                except (TypeError, ValueError):
                     ok = False
                     error_msg = f'Value error in parsing answer. Pred: {pred}, Gold: {gold}'
 
@@ -172,6 +175,9 @@ class TextMASMethod:
                     "raw_prediction": final_text,
                     "agents": agent_traces[idx],
                     "correct": ok,
+                    "evaluation_error": error_msg,
+                    **(medqa_scoring_metadata(final_text, gold, pred, ok)
+                       if self.task == 'medqa' else {}),
                 }
             )
         return results

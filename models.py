@@ -1,7 +1,4 @@
-import os
-import csv
 import torch
-import matplotlib.pyplot as plt
 from typing import Dict, List, Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -38,11 +35,14 @@ class ModelWrapper:
     def __init__(self, model_name: str, device: torch.device, use_vllm: bool = False, args = None):
         self.model_name = model_name
         self.device = device
-        self.use_vllm = use_vllm and _HAS_VLLM
+        if use_vllm and not _HAS_VLLM:
+            raise RuntimeError('use_vllm=True requires vLLM; install it or explicitly use the HF backend.')
+        self.use_vllm = use_vllm
         self.vllm_engine = None
         self.latent_space_realign = bool(getattr(args, "latent_space_realign", False)) if args else False
         self._latent_realign_matrices: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         self.args = args
+        self.seed = int(getattr(args, "seed", 42))
 
         # for ablation
         self.pre_aligned = None
@@ -55,17 +55,18 @@ class ModelWrapper:
             print(f"[vLLM] Using vLLM backend for model {model_name}")
             use_prefix_caching = bool(getattr(args, "enable_prefix_caching", False))
             is_latent_mas = getattr(args, "method", "") == "latent_mas"
-            if is_latent_mas and use_prefix_caching:
-                # latent_mas needs prompt embeds support in addition to prefix caching
-                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=True, enable_prompt_embeds=True)
+            if is_latent_mas:
+                # Prompt embeddings are required even when prefix caching is off.
+                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=use_prefix_caching, enable_prompt_embeds=True, seed=self.seed)
             elif use_prefix_caching:
                 # baseline / text_mas: prefix caching only (no prompt embeds needed)
-                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=True)
+                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=True, seed=self.seed)
             else:
-                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util)
+                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=False, seed=self.seed)
             self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            self.tokenizer.padding_side = 'left'
             
-            use_second_hf = bool(getattr(args, "use_second_HF_model", False)) if args else False
+            use_second_hf = is_latent_mas or bool(getattr(args, "use_second_HF_model", False))
             if use_second_hf:
                 self.HF_model = AutoModelForCausalLM.from_pretrained(
                     model_name,
@@ -82,6 +83,7 @@ class ModelWrapper:
 
         # fallback: normal transformers path
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        self.tokenizer.padding_side = 'left'
         _ensure_pad_token(self.tokenizer)
         with torch.no_grad():
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -163,6 +165,7 @@ class ModelWrapper:
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_new_tokens,
+            seed=self.seed,
         )
         outputs = self.vllm_engine.generate(prompts, sampling_params)
         generations = [out.outputs[0].text.strip() for out in outputs]
@@ -240,36 +243,74 @@ class ModelWrapper:
             raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, device=self.device)
-        prompt_lengths = attention_mask.sum(dim=1).tolist()
+        attention_mask = attention_mask.to(input_ids.device)
+        if (attention_mask.shape != input_ids.shape
+                or not ((attention_mask == 0) | (attention_mask == 1)).all()
+                or not attention_mask.any(dim=1).all()):
+            raise ValueError('Each prompt needs a matching binary mask and at least one real token')
+        if max_new_tokens < 1 or temperature < 0 or not 0 < top_p <= 1:
+            raise ValueError('Require max_new_tokens > 0, temperature >= 0 and 0 < top_p <= 1')
+        # Decoder-only generation samples logits at the last physical position.
+        # Normalize incoming left/right-padded prompts to left padding.
+        padded = torch.full_like(input_ids, self.tokenizer.pad_token_id)
+        prompt_mask = torch.zeros_like(attention_mask)
+        for i in range(input_ids.shape[0]):
+            real = input_ids[i, attention_mask[i].bool()]
+            padded[i, -len(real):] = real
+            prompt_mask[i, -len(real):] = 1
+        input_ids, attention_mask = padded, prompt_mask
+        generation_kwargs = {}
+        offset = torch.zeros(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
         if past_key_values is not None:
             past_len = _past_length(past_key_values)
             if past_len > 0:
-                past_mask = torch.ones(
-                    (attention_mask.shape[0], past_len),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
+                past_mask = getattr(past_key_values, '_latent_attention_mask', None)
+                offsets = getattr(past_key_values, '_latent_next_position', None)
+                if past_mask is None or offsets is None:
+                    raise ValueError('Cached decoding requires saved mask/position metadata')
+                past_mask = past_mask.to(attention_mask.device)
+                if past_mask.shape != (input_ids.shape[0], past_len):
+                    raise ValueError('Cache batch/length does not match the saved padding mask')
                 attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
+                # HF expects input_ids to include positions already in the cache.
+                # Their IDs are placeholders only; generate must process the new suffix.
+                prefix_ids = input_ids.new_full((input_ids.shape[0], past_len), self.tokenizer.pad_token_id)
+                input_ids = torch.cat([prefix_ids, input_ids], dim=-1)
+                offset = offsets.to(input_ids.device) - past_mask.sum(-1)
+                if (offset != 0).any():
+                    if not hasattr(self.model, '_prepare_position_ids_for_generation'):
+                        raise ValueError('Decoding a truncated latent cache requires Transformers 5.x')
+                    positions = attention_mask.long().cumsum(-1) - 1 + offset[:, None]
+                    generation_kwargs['position_ids'] = positions.masked_fill(attention_mask == 0, 0)
+        if temperature > 0:
+            generation_kwargs.update(temperature=temperature, top_p=top_p)
+        else:
+            generation_kwargs.update(temperature=None, top_p=None, top_k=None)
+        prompt_width = input_ids.shape[1]
         outputs = self.model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=True,
+            do_sample=temperature > 0,
             pad_token_id=self.tokenizer.pad_token_id,
             return_dict_in_generate=True,
             output_scores=False,
             past_key_values=past_key_values,
+            **generation_kwargs,
         )
         sequences = outputs.sequences
         generations: List[str] = []
-        for idx, length in enumerate(prompt_lengths):
-            length = int(length)
-            generated_ids = sequences[idx, length:]
+        for idx in range(sequences.shape[0]):
+            generated_ids = sequences[idx, prompt_width:]
             text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
             generations.append(text)
-        return generations, outputs.past_key_values
+        cache = outputs.past_key_values
+        if cache is not None and hasattr(cache, 'get_seq_length'):
+            added = cache.get_seq_length() - attention_mask.shape[1]
+            cache._latent_attention_mask = torch.cat([
+                attention_mask, attention_mask.new_ones((input_ids.shape[0], max(0, added)))], dim=-1).detach()
+            cache._latent_next_position = (cache._latent_attention_mask.sum(-1) + offset).detach()
+        return generations, cache
 
     def tokenize_text(self, text: str) -> torch.Tensor:
         return self.tokenizer(
@@ -287,154 +328,16 @@ class ModelWrapper:
         latent_steps: int,
         past_key_values: Optional[Tuple] = None,
     ) -> Tuple:
-        if input_ids.dim() != 2:
-            raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
+        from latent_batch import rollout
+        cache, _ = rollout(self, input_ids, attention_mask, latent_steps=latent_steps,
+                           past_key_values=past_key_values, return_embeddings=False)
+        return cache
 
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, device=self.device)
-        else:
-            attention_mask = attention_mask.to(self.device)
-
-        if past_key_values is not None:
-            past_len = _past_length(past_key_values)
-            if past_len > 0:
-                past_mask = torch.ones(
-                    (attention_mask.shape[0], past_len),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
-
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            use_cache=True,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-        past = outputs.past_key_values
-
-        if past_key_values is None:
-            # Right-padded batch: select last real (non-pad) token per sample
-            last_token_idx = attention_mask.sum(1).long() - 1  # [B]
-            batch_idx = torch.arange(input_ids.shape[0], device=input_ids.device)
-            e_t = outputs.hidden_states[0][batch_idx, last_token_idx, :]           # [B, D]
-            last_hidden = outputs.hidden_states[-1][batch_idx, last_token_idx, :]  # [B, D]
-        else:
-            # Incremental step: single new token, no padding
-            e_t = outputs.hidden_states[0][:, -1, :]           # [B, D]
-            last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
-        h_t = last_hidden.detach().clone()
-
-        e_t_plus_1 = None
-        latent_vecs_all: List[torch.Tensor] = []
-        latent_vecs_all.append(e_t.detach().clone())
-
-        for step in range(latent_steps):
-
-            source_model = self.HF_model if hasattr(self, "HF_model") else self.model
-            latent_vec = self._apply_latent_realignment(last_hidden, source_model)
-
-            latent_vecs_all.append(latent_vec.detach().clone())
-
-            if step == 0:
-                e_t_plus_1 = latent_vec.detach().clone()
-            
-            latent_embed = latent_vec.unsqueeze(1)
-
-            past_len = _past_length(past)
-            latent_mask = torch.ones(
-                (latent_embed.shape[0], past_len + 1),
-                dtype=torch.long,
-                device=self.device,
-            )
-            outputs = self.model(
-                inputs_embeds=latent_embed,
-                attention_mask=latent_mask,
-                past_key_values=past,
-                use_cache=True,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            past = outputs.past_key_values
-            last_hidden = outputs.hidden_states[-1][:, -1, :]
-
-        return past
-    
     @torch.no_grad()
     def generate_latent_batch_hidden_state(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        *,
-        latent_steps: int,
-        past_key_values: Optional[Tuple] = None,
-    ) -> Tuple:
-        if input_ids.dim() != 2:
-            raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
-        device_for_attention = getattr(self, "HF_device", self.device)
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, device=device_for_attention)
-        else:
-            attention_mask = attention_mask.to(device_for_attention)
-        if past_key_values is not None:
-            past_len = _past_length(past_key_values)
-            if past_len > 0:
-                past_mask = torch.ones(
-                    (attention_mask.shape[0], past_len),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
-        outputs = self.HF_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            use_cache=True,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-        past = outputs.past_key_values
-
-        curr_output_embedding = []
-        if past_key_values is None:
-            # Right-padded batch: select last real token per sample
-            last_token_idx = attention_mask.sum(1).long() - 1  # [B]
-            batch_idx = torch.arange(input_ids.shape[0], device=input_ids.device)
-            last_hidden = outputs.hidden_states[-1][batch_idx, last_token_idx, :]  # [B, D]
-            # Trim padding from initial embedding before passing to vLLM prompt embeds
-            max_real_len = int((last_token_idx + 1).max().item())
-            curr_output_embedding.append(outputs.hidden_states[0][:, :max_real_len, :])
-        else:
-            # Incremental step: no padding
-            last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
-            curr_output_embedding.append(outputs.hidden_states[0])  # input embedding
-        
-        
-        for _ in range(latent_steps):
-
-            source_model = self.HF_model if hasattr(self, "HF_model") else self.model
-            latent_vec = self._apply_latent_realignment(last_hidden, source_model)
-            latent_embed = latent_vec.unsqueeze(1)
-            past_len = _past_length(past)
-            latent_mask = torch.ones(
-                (latent_embed.shape[0], past_len + 1),
-                dtype=torch.long,
-                device=latent_embed.device,
-            )
-            outputs = self.HF_model(
-                inputs_embeds=latent_embed,
-                attention_mask=latent_mask,
-                past_key_values=past,
-                use_cache=True,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            past = outputs.past_key_values
-            last_hidden = outputs.hidden_states[-1][:, -1, :]
-
-            curr_output_embedding.append(latent_embed.detach())
-
-        return past, torch.cat(curr_output_embedding, dim=1) # Output input embeddings
-
+        self, input_ids, attention_mask=None, *, latent_steps, past_key_values=None,
+    ):
+        """Return HF cache and a ragged list of unpadded input/latent embeddings."""
+        from latent_batch import rollout
+        return rollout(self, input_ids, attention_mask, latent_steps=latent_steps,
+                       past_key_values=past_key_values)

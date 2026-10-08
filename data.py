@@ -1,4 +1,6 @@
 from typing import Dict, Iterable, Optional
+from pathlib import Path
+import re
 
 from datasets import load_dataset
 
@@ -196,23 +198,24 @@ def load_humanevalplus(
 
 
 # qa data from https://github.com/lupantech/AgentFlow/tree/main
-from typing import Iterable, Dict, Optional
-from datasets import load_dataset
-
 def load_medqa(split=None, subset=None, cache_dir=None):
-
-    ds = load_dataset("json", data_files="./data/medqa.json", split='train')
-    for item in ds:
+    # This is a packaged evaluation subset, not an official train split.
+    if split not in (None, 'test'):
+        raise ValueError('Packaged MedQA only supports evaluation (split=test); supply a separate loader for training data.')
+    source = Path(__file__).resolve().parent / 'data' / 'medqa.json'
+    ds = load_dataset("json", data_files=str(source), split='train', cache_dir=cache_dir)
+    for row, item in enumerate(ds):
         question = item["query"]
-        raw_answer = str(item["answer"])
-
-        choice_map = {"0":"A", "1":"B", "2":"C", "3":"D"}
-
-        for idx, op in enumerate(item['options']):
-            if raw_answer in op:
-                answer = choice_map[str(idx)].lower()
-                break
-
+        raw_answer = str(item["answer"]).strip()
+        options = item['options']
+        if len(options) != 4:
+            raise ValueError(f'MedQA row {row}: expected four options')
+        # Exact option text, not substring: "one" must not match "one plus".
+        clean = [re.sub(r'^\s*[A-Da-d][.):]\s*', '', op).strip() for op in options]
+        matches = [i for i, op in enumerate(clean) if raw_answer == op]
+        if len(matches) != 1:
+            raise ValueError(f'MedQA row {row}: answer does not uniquely match an option')
+        answer = 'abcd'[matches[0]]
         gold = normalize_answer(answer)
 
         yield {
@@ -220,4 +223,3 @@ def load_medqa(split=None, subset=None, cache_dir=None):
             "solution": answer,
             "gold": gold,
         }
-

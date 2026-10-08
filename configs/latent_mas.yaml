@@ -31,10 +31,10 @@ seed: 42
 # --- Batch size ---
 # HF backend không có paged attention → batch nhỏ để tránh OOM
 # vLLM: có thể dùng 32-64, HF: dùng 1-4
-generate_bs: 64
+generate_bs: 16
 
 # --- LatentMAS specific ---
-latent_steps: 20                # Số latent steps [0-80], tune để tối ưu accuracy
+latent_steps: 15                # Số latent steps [0-80], tune để tối ưu accuracy
 latent_space_realign: true      # Bật nếu cần latent→embedding alignment
 think: false                     # Thêm <think> token thủ công vào prompt
 

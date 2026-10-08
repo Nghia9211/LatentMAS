@@ -7,7 +7,13 @@ import numpy as np
 import torch
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int = 42) -> None:
+    """Seed host/torch RNGs; vLLM engine and requests must also receive seed.
+
+    PYTHONHASHSEED set here affects future child interpreters, not hash
+    randomization in this already-running interpreter. For that, launch with
+    PYTHONHASHSEED=42 (or the chosen seed).
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -36,6 +42,23 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
     return None
 
 
+def medqa_scoring_metadata(text, gold, legacy_prediction, legacy_correct):
+    """Strict boxed-choice score alongside unchanged historical scoring."""
+    boxes = re.findall(r"\\boxed\{([^}]*)\}", text)
+    final = boxes[-1].strip().lower() if boxes else None
+    prediction = final if final in ("a", "b", "c", "d") else None
+    return {
+        "metric_version": "legacy_with_medqa_boxed_v1",
+        "legacy_prediction": legacy_prediction,
+        "legacy_correct": bool(legacy_correct),
+        "medqa_boxed_v1": {
+            "prediction": prediction,
+            "correct": prediction is not None and prediction == normalize_answer(gold),
+            "parse_failed": prediction is None,
+        },
+    }
+
+
 def extract_gold(text: str) -> Optional[str]:
     match = re.search(r"####\s*([-+]?\d+(?:\.\d+)?)", text)
     return match.group(1) if match else None
@@ -55,27 +78,5 @@ def extract_markdown_python_block(text: str) -> Optional[str]:
     return None
 
 
-# to run python
-import traceback
-from multiprocessing import Process, Manager
-def run_with_timeout(code, timeout):
-    def worker(ns, code):
-        try:
-            local_ns = {}
-            exec(code, local_ns)
-            ns['ok'] = True
-            ns['error'] = None
-        except Exception:
-            ns['ok'] = False
-            ns['error'] = traceback.format_exc()
-    with Manager() as manager:
-        ns = manager.dict()
-        p = Process(target=worker, args=(ns, code))
-        p.start()
-        p.join(timeout)
-        if p.is_alive():
-            p.terminate()
-            ns['ok'] = False
-            ns['error'] = f"TimeoutError: Execution exceeded {timeout} seconds"
-        return ns.get('ok', False), ns.get('error', None)
-
+# Keep the public import used by all three methods.
+from code_execution import run_with_timeout
