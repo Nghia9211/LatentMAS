@@ -1,0 +1,14 @@
+# Original objective/normalization, expanded train set; NEW run, no old checkpoint.
+schema: block_ln_phi_train_zscore_v1
+profile: profiles/medqa_train1024_valid128_h100_expansion_20261018_v1
+out: matched_runs/ppo_train1024_original_baseline32_h100_20261019_v1
+eps: 0.00001
+projection_norm: true
+iterations: 32
+warmstart_epochs: 50
+# Also evaluate iteration0 (fresh warm-start) with RNG restored afterward.
+validation_every: 8
+wandb_mode: online
+wandb_project: Controller-Latent-Reasoning
+wandb_entity: theanha2hvtls-ai4life
+wandb_name: ppo-train1024-original-baseline32-20261019-v1

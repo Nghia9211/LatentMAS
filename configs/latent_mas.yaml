@@ -9,7 +9,7 @@ num_agents: 2                   # Planner (latent) -> Judger (text)
 
 # --- Model ---
 model_name: "Qwen/Qwen3-4B"     # hoặc Qwen/Qwen3-4B
-task: "medqa"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
+task: "mbppplus"                    # gsm8k | aime2024 | aime2025 | gpqa | arc_easy | arc_challenge | mbppplus | humanevalplus | medqa
 split: "test"
 max_samples: -1                  # -1 = toàn bộ dataset
 
@@ -34,7 +34,8 @@ seed: 42
 generate_bs: 16
 
 # --- LatentMAS specific ---
-latent_steps: 15                # Số latent steps [0-80], tune để tối ưu accuracy
+latent_steps: 20                # Số latent steps [0-80], tune để tối ưu accuracy
+# Judger B chỉ sinh reasoning/đáp án bằng text; không có latent stage riêng.
 latent_space_realign: true      # Bật nếu cần latent→embedding alignment
 think: false                     # Thêm <think> token thủ công vào prompt
 

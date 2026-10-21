@@ -168,6 +168,35 @@ class ScoringAndDataTests(unittest.TestCase):
 class RunnerTests(unittest.TestCase):
     cli = ['--method', 'latent_mas', '--model_name', 'Qwen/Qwen3-4B']
 
+    def test_removed_b_latent_cli_and_yaml_rejected(self):
+        removed = {'judger_mode': 'latent_then_answer', 'judger_latent_steps': 10,
+                   'answer_max_new_tokens': 64, 'answer_choice_constraint': True}
+        for key, value in removed.items():
+            extra = ['--' + key] + ([] if isinstance(value, bool) else [str(value)])
+            with self.subTest(key=key), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    run.parse_args(self.cli + extra)
+                with patch('run._load_yaml_config', return_value={key: value}):
+                    with self.assertRaises(SystemExit):
+                        run.parse_args(self.cli + ['--config', 'mock.yaml'])
+
+    def test_current_configs_have_no_b_latent_options(self):
+        removed = {'judger_mode', 'judger_latent_steps', 'answer_max_new_tokens',
+                   'answer_choice_constraint'}
+        for name in ('latent_mas', 'text_mas', 'baseline'):
+            with self.subTest(config=name):
+                args = run.parse_args(['--config', str(Path(__file__).parents[1] /
+                                                       'configs' / (name + '.yaml'))])
+                self.assertTrue(removed.isdisjoint(vars(args)))
+
+    def test_programmatic_removed_mode_rejected(self):
+        args = SimpleNamespace(num_agents=2, device='cpu', device2='cpu',
+                               max_new_tokens=8, task='medqa',
+                               judger_mode='latent_then_answer')
+        with patch('methods.latent_mas.SamplingParams', SimpleNamespace):
+            with self.assertRaisesRegex(ValueError, 'removed'):
+                LatentMASMethod(SimpleNamespace(), args=args)
+
     def test_bad_arguments_fail_before_loading(self):
         for extra in (['--generate_bs', '0'], ['--max_samples', '0'],
                       ['--latent_steps', '-1'], ['--temperature', 'nan'], ['--top_p', '2']):
@@ -248,6 +277,23 @@ else:
         self.assertEqual(summary['requested_max_samples'], 99)
         self.assertEqual(summary['run_config']['max_samples'], 99)
         self.assertEqual(summary['time_per_sample_sec'], summary['total_time_sec'])
+
+    def test_latent_summary_preserves_a_steps_and_b_tokens(self):
+        args = run.parse_args(self.cli + ['--max_samples', '1', '--latent_steps', '20'])
+        method = SimpleNamespace(agents=[object(), object()], run_batch=lambda items: [
+            {'correct': True, 'question': 'q',
+             'generation': {'generated_tokens': 17, 'finish_reason': 'stop'}}])
+        with patch('run.parse_args', return_value=args), patch('run.set_seed'), \
+             patch('run.load_items', return_value=[{'question': 'q'}]), patch('run.ModelWrapper'), \
+             patch('run.LatentMASMethod', return_value=method), patch('run.save_results') as save, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            run.main()
+        summary = save.call_args.args[1]
+        self.assertEqual(summary['latent_steps'], 20)
+        self.assertEqual(summary['judger_mode'], 'text')
+        self.assertEqual(summary['generated_B_tokens'], 17)
+        for key in ('judger_latent_steps', 'answer_max_new_tokens', 'answer_choice_constraint'):
+            self.assertNotIn(key, summary)
 
 
 class ExecutionTests(unittest.TestCase):

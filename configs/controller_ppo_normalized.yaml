@@ -1,0 +1,13 @@
+# A NEW run only. Default runner stage is CPU prepare, never automatic training.
+schema: block_ln_phi_train_zscore_v1
+profile: profiles/medqa_train256_valid128_temp06_bs16_20261015_v1
+out: matched_runs/ppo_train256_normalized_v1
+eps: 0.00001
+projection_norm: true
+iterations: 80
+warmstart_epochs: 50
+validation_every: 16
+wandb_mode: online
+wandb_project: Controller-Latent-Reasoning
+wandb_entity: theanha2hvtls-ai4life
+wandb_name: ppo-train256-normalized-v1

@@ -1,9 +1,36 @@
+# Adaptive latent handoff controller
+
+Research extension of [Gen-Verse/LatentMAS](https://github.com/Gen-Verse/LatentMAS).
+Two frozen Qwen3-4B agents perform latent reasoning (A) and answer generation (B).
+A controller chooses HANDOFF or CONTINUE at K=10,20,...,80; K80 forces handoff.
+
+- [Current controller design, analysis, evidence and operation](docs/README.md).
+- [Controller modules](controller/README.md).
+- [Scripts](scripts/README.md).
+
+Run from the repository root. The full CPU regression suite is
+`CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v`.
+Some tests require local MedQA exports, archived runs or a cached model tokenizer;
+see the publication notes before running on a fresh clone. Current schemas and verification notes are documented in
+[the three-group guide](docs/README.md).
+
+Generated data, profiles, checkpoints and evaluation outputs are excluded by
+`.gitignore`; they are retained locally. Frozen experiment configurations and
+source snapshots describe their original execution environments. They require
+explicit migration before reuse on another machine.
+
+The material below is the upstream LatentMAS README. Its paper results and
+performance claims concern the upstream framework; controller experiment
+results are documented separately.
+
+---
+
 <a name="readme-top"></a>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo.png">
-    <img alt="LatentMAS" src="assets/logo.png" width=500>
+    <source media="(prefers-color-scheme: dark)" srcset="assets_latentmas/logo.png">
+    <img alt="LatentMAS" src="assets_latentmas/logo.png" width=500>
   </picture>
 </p>
 
@@ -24,10 +51,14 @@ Latent Collaboration in Multi-Agent Systems
 ---
 
 <p align="center">
-  <img src="assets/main_res.png" width="1000">
+  <img src="assets_latentmas/main_res.png" width="1000">
 </p>
 
 ## 💡 Introduction
+
+Local adaptive-handoff extension: core code is in [controller/](controller/README.md),
+CLI entrypoints remain in [scripts/](scripts/README.md), and the current research
+protocol is documented in [docs/](docs/README.md).
 
 
 **LatentMAS** is a multi-agent reasoning framework that **moves agent collaboration from token space into the model’s latent space**.  
@@ -40,7 +71,7 @@ Instead of producing long textual reasoning traces, agents communicate by **pass
 Overall, LatentMAS achieves **superior performance**, **lower token usage**, and **major wall-clock speedups** of the multi-agent system.
 
 <p align="center">
-  <img src="assets/main.png" width="1000">
+  <img src="assets_latentmas/main.png" width="1000">
 </p>
 
 
@@ -107,13 +138,13 @@ Explore community-driven extensions that expand LatentMAS into new domains, arch
 Three main tables from our paper spanning 9 tasks across math & science reasoning, commensonse reasoning, and code generation:
 
 - **Table 1 — LatentMAS under the Sequantial MAS setting**  
-  <p align="center"><img src="assets/main_table1.png" width="1000"></p>
+  <p align="center"><img src="assets_latentmas/main_table1.png" width="1000"></p>
 
 - **Table 2 — LatentMAS under the Hierarchical MAS setting**  
-  <p align="center"><img src="assets/main_table2.png" width="1000"></p>
+  <p align="center"><img src="assets_latentmas/main_table2.png" width="1000"></p>
 
 - **Table 3 — Main Results on Reasoning Intensive Tasks**
-  <p align="center"><img src="assets/main_table3.png" width="1000"></p>
+  <p align="center"><img src="assets_latentmas/main_table3.png" width="1000"></p>
 
 
 ### ⚡ Superior Efficiency on **Time and Tokens**

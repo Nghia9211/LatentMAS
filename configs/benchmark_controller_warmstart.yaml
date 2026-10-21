@@ -1,0 +1,20 @@
+# Technical timing/memory benchmark only; no tuning or evaluation on test300.
+seed: 42
+device: cuda:0
+controller_dtype: float32
+candidates: [raw_linear, raw_mlp, projection_gru]
+width: 128
+normalization: none
+dropout: 0.0
+objective: tie_ce_plus_huber_q
+q_weight: 1.0
+optimizer: AdamW
+learning_rate: 0.0003
+weight_decay: 0.0
+grad_clip: 1.0
+question_batch_sizes: [8, 32]
+warmup_updates: 50
+epochs: 500
+repeats: 3
+split: train
+technical_only: true

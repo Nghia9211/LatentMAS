@@ -56,6 +56,8 @@ class LatentMASMethod:
             seed=int(getattr(args, "seed", 42)),
         ) if SamplingParams is not None else None
         self.task = args.task
+        if getattr(args, 'judger_mode', 'text') != 'text':
+            raise ValueError('Only the text judger is supported; additional B latent reasoning was removed')
 
     @staticmethod
     def _slice_tensor(tensor: torch.Tensor, tokens_to_keep: int) -> torch.Tensor:
@@ -106,7 +108,6 @@ class LatentMASMethod:
         final_texts = ["" for _ in range(batch_size)]
 
         for agent in self.agents:
-
             if self.args.prompt == "sequential":
                 batch_messages = [
                     build_agent_message_sequential_latent_mas(role=agent.role, question=item["question"], context="", method=self.method_name, args=self.args)
@@ -287,7 +288,6 @@ class LatentMASMethod:
         rollout_seconds = 0.0
         generation_seconds = 0.0
         for agent in self.agents:
-            
             if self.args.prompt == "sequential":
                 batch_messages = [
                     build_agent_message_sequential_latent_mas(role=agent.role, question=item["question"], context="", method=self.method_name, args=self.args)
@@ -482,6 +482,7 @@ class LatentMASMethod:
                     "correct": ok,
                     "evaluation_error": error_msg,
                     "generation": generation_metadata[idx],
+                    "judger_mode": "text",
                     "batch_timing": {"batch_size": batch_size,
                                      "hf_rollout_seconds": rollout_seconds,
                                      "vllm_generation_seconds": generation_seconds},

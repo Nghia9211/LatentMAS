@@ -43,12 +43,36 @@ class ModelWrapper:
         self._latent_realign_matrices: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         self.args = args
         self.seed = int(getattr(args, "seed", 42))
+        revision = getattr(args, 'model_revision', None)
+        model_kwargs = {'revision': revision} if revision is not None else {}
+        engine_kwargs = dict(model_kwargs)
+        if revision is not None:
+            engine_kwargs['tokenizer_revision'] = revision
+        if getattr(args, 'vllm_dtype', None) is not None:
+            engine_kwargs['dtype'] = args.vllm_dtype
+        if getattr(args, 'worker_extension_cls', None):
+            engine_kwargs['worker_extension_cls'] = args.worker_extension_cls
+        # Optional scheduler/memory limits for a new recorded runtime only.
+        for name in ('max_model_len', 'max_num_seqs', 'max_num_batched_tokens'):
+            value = getattr(args, 'vllm_' + name, None)
+            if value is not None:
+                if type(value) is not int or value < 1:
+                    raise ValueError('Invalid vLLM runtime limit: ' + name)
+                engine_kwargs[name] = value
 
         # for ablation
         self.pre_aligned = None
 
         if self.use_vllm:
-            
+            reservation_gib = getattr(args, 'hf_memory_reservation_gib', 0)
+            if (isinstance(reservation_gib, bool) or not isinstance(reservation_gib, (int,float))
+                    or not 0 <= reservation_gib <= 32):
+                raise ValueError('Invalid HF memory reservation')
+            # Keep a LIVE allocation while vLLM compiles, preventing a shared
+            # GPU race. Release into this process's allocator immediately before
+            # moving CPU-loaded HF weights; the same process reuses those blocks.
+            hf_reservation = (torch.empty(int(reservation_gib * 1024**3),
+                dtype=torch.uint8, device=args.device2) if reservation_gib else None)
             tp_size = max(1, int(getattr(args, "tensor_parallel_size", 1)))
             gpu_util = float(getattr(args, "gpu_memory_utilization", 0.9))
             
@@ -57,21 +81,24 @@ class ModelWrapper:
             is_latent_mas = getattr(args, "method", "") == "latent_mas"
             if is_latent_mas:
                 # Prompt embeddings are required even when prefix caching is off.
-                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=use_prefix_caching, enable_prompt_embeds=True, seed=self.seed)
+                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=use_prefix_caching, enable_prompt_embeds=True, seed=self.seed, **engine_kwargs)
             elif use_prefix_caching:
                 # baseline / text_mas: prefix caching only (no prompt embeds needed)
-                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=True, seed=self.seed)
+                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=True, seed=self.seed, **engine_kwargs)
             else:
-                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=False, seed=self.seed)
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+                self.vllm_engine = LLM(model=model_name, tensor_parallel_size=tp_size, gpu_memory_utilization=gpu_util, enable_prefix_caching=False, seed=self.seed, **engine_kwargs)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, **model_kwargs)
             self.tokenizer.padding_side = 'left'
             
             use_second_hf = is_latent_mas or bool(getattr(args, "use_second_HF_model", False))
             if use_second_hf:
-                self.HF_model = AutoModelForCausalLM.from_pretrained(
+                hf_model = AutoModelForCausalLM.from_pretrained(
                     model_name,
                     torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
-                ).to(args.device2).eval() 
+                    **model_kwargs,
+                )
+                del hf_reservation
+                self.HF_model = hf_model.to(args.device2).eval()
                 self.embedding_layer = self.HF_model.get_input_embeddings()
                 self.HF_device = args.device2
                 # if self.latent_space_realign:
@@ -82,13 +109,14 @@ class ModelWrapper:
             return  # skip loading transformers model
 
         # fallback: normal transformers path
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, **model_kwargs)
         self.tokenizer.padding_side = 'left'
         _ensure_pad_token(self.tokenizer)
         with torch.no_grad():
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+                **model_kwargs,
             )
         if len(self.tokenizer) != self.model.get_input_embeddings().weight.shape[0]:
             self.model.resize_token_embeddings(len(self.tokenizer))
@@ -99,11 +127,13 @@ class ModelWrapper:
         if self.latent_space_realign:
             self._ensure_latent_realign_matrix(self.model, self.device, args)
 
-    def render_chat(self, messages: List[Dict], add_generation_prompt: bool = True) -> str:
+    def render_chat(self, messages: List[Dict], add_generation_prompt: bool = True,
+                    enable_thinking: Optional[bool] = None) -> str:
         tpl = getattr(self.tokenizer, "chat_template", None)
         if tpl:
+            options = {} if enable_thinking is None else {'enable_thinking': enable_thinking}
             return self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=add_generation_prompt
+                messages, tokenize=False, add_generation_prompt=add_generation_prompt, **options
             )
         segments = []
         for message in messages:
@@ -238,7 +268,9 @@ class ModelWrapper:
         temperature: float = 0.7,
         top_p: float = 0.95,
         past_key_values: Optional[Tuple] = None,
-    ) -> Tuple[List[str], Optional[Tuple]]:
+        allowed_answers: Optional[List[str]] = None,
+        return_metadata: bool = False,
+    ) -> tuple:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
         if attention_mask is None:
@@ -287,6 +319,27 @@ class ModelWrapper:
         else:
             generation_kwargs.update(temperature=None, top_p=None, top_k=None)
         prompt_width = input_ids.shape[1]
+        eos_ids = self.model.generation_config.eos_token_id
+        eos_ids = [] if eos_ids is None else ([eos_ids] if isinstance(eos_ids, int) else list(eos_ids))
+        if allowed_answers is not None:
+            candidates = [self.tokenizer(a, add_special_tokens=False)['input_ids'] for a in allowed_answers]
+            if not candidates or any(not ids for ids in candidates) or not eos_ids:
+                raise ValueError('Answer constraints require nonempty choices and an EOS token')
+            if max_new_tokens < max(map(len, candidates)) + 1:
+                raise ValueError('Answer token budget must fit every allowed choice plus EOS')
+
+            def allowed_tokens(batch_id, ids):
+                suffix = ids[prompt_width:].tolist()
+                next_tokens = set()
+                for candidate in candidates:
+                    if candidate[:len(suffix)] == suffix:
+                        next_tokens.update(eos_ids if len(suffix) == len(candidate)
+                                           else [candidate[len(suffix)]])
+                if not next_tokens:
+                    raise ValueError('Generated prefix does not match any allowed answer')
+                return sorted(next_tokens)
+
+            generation_kwargs['prefix_allowed_tokens_fn'] = allowed_tokens
         outputs = self.model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -300,17 +353,27 @@ class ModelWrapper:
         )
         sequences = outputs.sequences
         generations: List[str] = []
+        metadata = []
         for idx in range(sequences.shape[0]):
             generated_ids = sequences[idx, prompt_width:]
             text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
             generations.append(text)
+            if return_metadata:
+                ids = generated_ids.tolist()
+                stop = next((j for j, token in enumerate(ids) if token in eos_ids), None)
+                if stop is not None:
+                    ids = ids[:stop + 1]
+                metadata.append({'output_token_ids': ids, 'generated_tokens': len(ids),
+                                 'finish_reason': 'stop' if stop is not None else 'length',
+                                 'stop_reason': ids[-1] if stop is not None else None,
+                                 'prompt_embedding_tokens': int(attention_mask[idx].sum())})
         cache = outputs.past_key_values
         if cache is not None and hasattr(cache, 'get_seq_length'):
             added = cache.get_seq_length() - attention_mask.shape[1]
             cache._latent_attention_mask = torch.cat([
                 attention_mask, attention_mask.new_ones((input_ids.shape[0], max(0, added)))], dim=-1).detach()
             cache._latent_next_position = (cache._latent_attention_mask.sum(-1) + offset).detach()
-        return generations, cache
+        return (generations, cache, metadata) if return_metadata else (generations, cache)
 
     def tokenize_text(self, text: str) -> torch.Tensor:
         return self.tokenizer(
@@ -336,8 +399,9 @@ class ModelWrapper:
     @torch.no_grad()
     def generate_latent_batch_hidden_state(
         self, input_ids, attention_mask=None, *, latent_steps, past_key_values=None,
+        observer=None,
     ):
         """Return HF cache and a ragged list of unpadded input/latent embeddings."""
         from latent_batch import rollout
         return rollout(self, input_ids, attention_mask, latent_steps=latent_steps,
-                       past_key_values=past_key_values)
+                       past_key_values=past_key_values, observer=observer)

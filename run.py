@@ -60,6 +60,8 @@ def save_results(preds: List[Dict], summary: Dict, args: argparse.Namespace) -> 
         f.write(f"Method         : {summary['method']}\n")
         if summary.get("latent_steps") is not None:
             f.write(f"Latent steps   : {summary['latent_steps']} (per latent agent)\n")
+        if summary.get('judger_mode') is not None:
+            f.write(f"Judger mode    : {summary['judger_mode']}\n")
         f.write(f"Model          : {summary['model']}\n")
         f.write(f"Task           : {summary['task']}\n")
         f.write(f"Split          : {summary['split']}\n")
@@ -72,6 +74,9 @@ def save_results(preds: List[Dict], summary: Dict, args: argparse.Namespace) -> 
             f.write(f"Parse failures : {summary['medqa_boxed_v1_parse_failures']}\n")
         f.write(f"Total time     : {summary['total_time_sec']} sec\n")
         f.write(f"Time/sample    : {summary['time_per_sample_sec']} sec\n")
+        if 'generated_B_tokens' in summary:
+            f.write(f"B output tokens: {summary['generated_B_tokens']} total; {summary['mean_generated_B_tokens']:.2f} / sample\n")
+            f.write(f"B length stops : {summary['B_length_finishes']}\n")
         f.write("\n" + "-" * 60 + "\n")
         f.write("Per-sample results:\n")
         f.write("-" * 60 + "\n")
@@ -372,6 +377,7 @@ def main():
         "method": args.method,
         "num_agents": len(method.agents) if hasattr(method, "agents") else 1,
         "latent_steps": args.latent_steps if args.method == "latent_mas" else None,
+        "judger_mode": "text" if args.method == 'latent_mas' else None,
         "model": args.model_name,
         "task": args.task,
         "split": args.split,
@@ -395,6 +401,10 @@ def main():
         except PackageNotFoundError:
             summary["package_versions"][name] = None
     summary["backend"] = "hf+vllm" if args.use_vllm and args.method == "latent_mas" else ("vllm" if args.use_vllm else "hf")
+    if preds and all('generated_tokens' in p.get('generation', {}) for p in preds):
+        summary['generated_B_tokens'] = sum(p['generation']['generated_tokens'] for p in preds)
+        summary['mean_generated_B_tokens'] = summary['generated_B_tokens'] / len(preds)
+        summary['B_length_finishes'] = sum(p['generation']['finish_reason'] == 'length' for p in preds)
     if args.task == 'medqa':
         summary['dataset_source'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'medqa.json')
         summary['dataset_note'] = 'Packaged local evaluation subset; official split provenance not verified.'

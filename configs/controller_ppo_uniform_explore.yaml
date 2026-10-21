@@ -1,0 +1,19 @@
+# Exactly two exploration interventions on the normalized controller path.
+schema: normalized_uniform_budget_init_tie_ramp_v1
+profile: profiles/medqa_train256_valid128_temp06_bs16_20261015_v1
+out: matched_runs/ppo_normalized_uniform_tie_ramp8_20261016_v1
+eps: 0.00001
+projection_norm: true
+iterations: 8
+warmstart_epochs: 50
+validation_every: 8
+tie_zero_iterations: 4
+tie_ramp_end_iteration: 8
+after_greedy: evaluations/greedy_B_train32_valid32_20261016_v1
+greedy_processes:
+  - pid: 1638911
+  - pid: 1639097
+wandb_mode: online
+wandb_project: Controller-Latent-Reasoning
+wandb_entity: theanha2hvtls-ai4life
+wandb_name: ppo-normalized-uniform-init-tie-ramp-8iters

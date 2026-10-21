@@ -1,0 +1,12 @@
+schema: hk_cosine10_k_train_zscore_v1
+baseline_training: matched_runs/ppo_train1024_simple_hk_l2_k_200_h100_20261020_v2
+profile: profiles/medqa_train1024_valid128_h100_expansion_20261018_v1
+out: matched_runs/ppo_train1024_hk_cosine10_k_64_h100_20261021_v2
+job: /data/nghialt/.remote-workspace/jobs/latentmas-ppo-cosine-state64-20261021-v2
+iterations: 64
+validation_every: 16
+comparison_iteration: 32
+wandb_mode: offline
+wandb_project: Controller-Latent-Reasoning
+wandb_entity: theanha2hvtls-ai4life
+wandb_name: ppo-train1024-hk-cosine10-k-64-20261021-v2-offline

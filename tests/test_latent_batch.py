@@ -59,6 +59,19 @@ class BatchTests(unittest.TestCase):
         self.assertEqual([len(x['prompt_embeds']) for x in inputs], [3, 5])
         torch.testing.assert_close(inputs[0]['prompt_embeds'], torch.cat([emb[0,:1], prefixes[0], emb[0,1:2]]))
 
+    def test_embedding_rollout_matches_ids_and_preserves_inputs(self):
+        ids = torch.tensor([[0, 4, 5], [6, 7, 8]])
+        _, from_ids = rollout(self.wrapper, ids, ids.ne(0), latent_steps=2)
+        supplied = self.wrapper.HF_model.get_input_embeddings()(ids).detach()
+        original = supplied.clone()
+        _, from_embeds = rollout(self.wrapper, inputs_embeds=supplied,
+                                attention_mask=ids.ne(0), latent_steps=2)
+        torch.testing.assert_close(supplied, original)
+        for a, b in zip(from_ids, from_embeds):
+            torch.testing.assert_close(a, b, atol=3e-6, rtol=3e-5)
+        with self.assertRaises(ValueError):
+            rollout(self.wrapper, ids, inputs_embeds=supplied, latent_steps=1)
+
     def test_medqa_parser(self):
         for text, expected in [(r'Answer: \boxed{ C }', 'c'), ('Patient is 34', None),
                                ('I think B', None), (r'\boxed{B} then \boxed{wrong}', None)]:
@@ -106,6 +119,14 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(engine.lengths[1] - engine.lengths[0], count * 5)
             self.assertTrue(all(r['medqa_boxed_v1']['correct'] for r in results))
             self.assertEqual(results[0]['generation']['finish_reason'], 'stop')
+            self.assertEqual(results[0]['judger_mode'], 'text')
+            self.assertNotIn('judger_latent_steps', results[0])
+            for trace in results[0]['agents']:
+                if trace['role'] == 'judger':
+                    self.assertNotIn('latent_steps', trace)
+                    self.assertEqual(trace['output'], r'\boxed{C}')
+                else:
+                    self.assertEqual(trace['latent_steps'], 2)
 
 
 if __name__ == '__main__':

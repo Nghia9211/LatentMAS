@@ -1,3 +1,34 @@
-output/*
-*.pyc
+# Generated experiment artifacts stay on the machine.
+/output/
+/profiles/
+/matched_runs/
+/evaluations/
+/diagnostics/
+/data/medqa_usmle_4options/
+/wandb/
+
+# Python caches, local environments and tooling.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Local credentials/configuration; templates may be published.
 .env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+.ssh/
+
+# Local model/checkpoint downloads (not source fixtures).
+/checkpoints/
+/models/
+/.cache/

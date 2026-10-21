@@ -5,3 +5,22 @@ tqdm
 accelerate
 datasets
 pyyaml
+# Optional; install in the interpreter used for controller training.
+wandb==0.30.0
+# Coupled HF/vLLM runtime. Keep this pair in the same dependency resolution.
+torch==2.11.0
+vllm==0.25.1
+transformers==5.17.0
+
+# Model/data/profiling/controller dependencies.
+numpy==2.3.5
+tqdm==4.70.1
+accelerate==1.15.0
+datasets==5.0.0
+PyYAML==6.0.3
+safetensors==0.8.0
+huggingface-hub==1.31.0
+sentencepiece==0.2.2
+ninja==1.13.2
+
+matplotlib==3.11.2
