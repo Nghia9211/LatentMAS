@@ -1,6 +1,10 @@
 # RL Controller — thiết kế và phân tích hiện tại
 
-Tài liệu chính của nhánh adaptive latent handoff. Chốt nội dung ngày 21/10/2026.
+Tài liệu chính của nhánh adaptive latent handoff. Nội dung nền chốt ngày
+21/10/2026; bổ sung ưu tiên dữ liệu ngày 22/10/2026 tại
+[§6.1 — nhóm adaptive-help khoảng 10% train](#train-data-priority).
+Đọc phần này trước khi đề xuất thí nghiệm tiếp theo. Các mốc protocol/kết quả
+21/10 bên dưới là snapshot lịch sử; run mới phải đối chiếu job manifests/logs.
 Các báo cáo pilot, migration, proposal và bảng kết quả đã loại không còn là
 hướng dẫn làm việc. Không tự khôi phục hoặc tiếp tục các nhánh đó.
 
@@ -122,6 +126,79 @@ Không xóa hoặc sửa raw results để biến kết luận chưa tốt thàn
 
 ## 6. Phân tích còn cần theo dõi
 
+<a id="train-data-priority"></a>
+
+### 6.1. Ưu tiên cao: nhóm adaptive-help chỉ khoảng 10% train
+
+**Đây là vấn đề dữ liệu trọng tâm cần phân tích trước khi đề xuất đổi state,
+loss, kiến trúc hoặc train dài hơn. AI/người mới tiếp nhận cần đọc phần này và
+xoáy sâu vào tín hiệu giúp chọn K, thay vì chỉ tối ưu đường train loss.**
+
+Kiểm tra ngày 22/10/2026 trên profile đủ tám K10–80, ba seed 42/43/44:
+một K “đạt” khi B trả lời đúng theo strict scorer ở ít nhất 2/3 seed.
+Parse failure vẫn tính sai. Đây là định nghĩa phân nhóm trên bảng lịch sử,
+không phải xác suất đúng thực tế đã được xác nhận bằng nhiều lần chạy mới.
+
+| Nhóm câu, theo cùng ngưỡng 2/3 | Train (1.024 câu) | Validation (128 câu) |
+|---|---:|---:|
+| Đã đạt ở K10 | 704 (68,75%) | 75 (58,59%) |
+| Chưa đạt ở K10, nhưng ít nhất một K20–80 đạt: **adaptive-help** | **99 (9,67%)** | **16 (12,50%)** |
+| Không K nào đạt ngưỡng | 221 (21,58%) | 37 (28,91%) |
+
+**Không viết “K10 chỉ sai khoảng 10%”.** Tổng nhóm chưa đạt ở K10 là
+320/1.024 = 31,25%; trong đó 99 câu có K sau đạt ngưỡng, còn 221 câu chưa
+có K nào đạt ngưỡng. “Không đạt 2/3” cũng không đồng nghĩa sai cả ba lần:
+151/1.024 câu mới là nhóm sai ở mọi K trên cả ba seed.
+
+Ý nghĩa đối với controller:
+
+- Nhóm chuyển từ chưa đạt sang đạt là thiểu số. Accuracy/CE tổng thể có thể
+  thiên về dừng ở K10 và che mất khả năng nhận diện các câu cần CONTINUE.
+  Ví dụ nhãn supervised first-success hiện có 800 HANDOFF và 232 CONTINUE
+  trên 1.032 quyết định được gán nhãn; K80 là forced handoff, không có nhãn
+  hành động học được tại K80.
+- Cần xét đồng thời câu được cứu và câu vốn đúng bị làm sai khi đi tiếp.
+  Cải thiện trên 99 câu không tự bảo đảm cải thiện accuracy toàn bộ tập.
+- 9,67% là quy mô nhóm theo tiêu chí trên, **không phải mức tăng accuracy
+  hứa hẹn hoặc cận trên hiệu năng online**. Câu đạt 2/3 ở K10 vẫn có thể
+  thay đổi tỷ lệ đúng ở K khác; phân nhóm này không mô tả hết các thay đổi đó.
+- K “tốt nhất” được chọn sau khi xem đủ bảng có selection bias. Profile còn
+  chứa các điều kiện GB10/H100 và engine lifetime khác nhau. Không kết luận
+  K lớn giúp một câu một cách ổn định chỉ từ một seed hoặc bảng oracle.
+
+**Các câu hỏi bắt buộc cho AI/người tiếp tục explore:**
+
+1. **Lợi ích có lặp lại không?** Giữ K ứng viên đã chọn từ dữ liệu khám phá,
+   kiểm K10 và K đó bằng seed mới, cùng hardware/prompt/decoder/batch/cache.
+   Không chọn lại K tốt nhất trên chính các lần chạy dùng để kiểm chứng.
+2. **State có nhận diện được nhóm cần đi tiếp không?** Dùng question-level
+   folds, train-only normalization và các baseline đơn giản; báo precision,
+   recall/PR-AUC cho CONTINUE cùng kết quả toàn tập. Không chia các K/seed
+   của một câu sang cả train và held-out fold. Kết quả B/future K chỉ dùng
+   tạo target train hoặc phân tích, tuyệt đối không đưa vào state khi chạy.
+3. **Sampler/nhãn có làm mất nhóm thiểu số không?** Báo riêng ba nhóm trong
+   bảng; kiểm tỷ lệ HANDOFF/CONTINUE, độ phủ câu/K và các nhóm reward bằng
+   nhau của GRPO. Sampling cân bằng hoặc weighting là giả thuyết cần so sánh,
+   không tự thay protocol hay chỉ đánh giá trên tập adaptive-help.
+4. **Net gain có dương trên đủ câu không?** Báo accuracy, rescue/harm so với
+   fixed K10, phân bố K và kết quả từng nhóm trên toàn validation/test, kể cả
+   câu không có K đạt ngưỡng. Tách kết quả bảng cũ, accuracy nhãn hành động
+   và correctness của B chạy mới; loss giảm không thay cho kiểm tra này.
+
+Nguồn để kiểm lại và lấy source IDs của từng câu:
+
+- Profile gốc: `profiles/medqa_train1024_valid128_h100_expansion_20261018_v1`.
+- Bảng đầy đủ và kết quả từng câu:
+  `/data/nghialt/.remote-workspace/jobs/latentmas-fullK-correct-exclusive-20261022-v1/summary.json`
+  và `per_question.jsonl` trong cùng thư mục.
+- Danh sách ba nhóm train/validation:
+  `/data/nghialt/.remote-workspace/jobs/latentmas-warm-mixed-grpo64-20261022-v1/sampler_strata.json`.
+- Nhãn supervised và provenance:
+  `matched_runs/supervised_train1024_firstK_majority_c1_50_h100_20261022_v1/labels/`
+  (resolve attempt từ `complete.json`, không sửa raw artifacts).
+
+### 6.2. Các phân tích khác còn cần theo dõi
+
 1. **Cosine chỉ là tín hiệu hình học.** Hidden ít đổi chưa chứng minh B đã có
    đáp án đúng. Thay L2 bằng cosine cần được kiểm tra bằng live B.
 2. **State cũ đã normalize.** Không diễn giải vấn đề trước đây là quên normalize.
@@ -139,9 +216,10 @@ Không xóa hoặc sửa raw results để biến kết luận chưa tốt thàn
 6. **Oracle khác controller.** Any-K/any-seed đúng là retrospective upper bound
    có sử dụng outcomes; không báo như accuracy khả thi đã đạt của một run adaptive.
 
-Bước nghiên cứu tiếp theo là kiểm tra cosine với cùng reward/kiến trúc và live
-rollout, sau khi giải quyết điều kiện khởi tạo GPU. Không tự mở thêm ablation,
-đổi state/reward hoặc kéo dài training.
+Ưu tiên nghiên cứu tiếp theo là kiểm chứng vấn đề dữ liệu và khả năng nhận diện
+nhóm adaptive-help ở §6.1 trước khi kết luận cần đổi state/loss/kiến trúc.
+Các kiểm tra này là hướng phân tích, không tự cấp quyền mở thêm ablation,
+đổi protocol hoặc kéo dài training ngoài các run người dùng đã yêu cầu.
 
 ## 7. Evaluation và logging
 
