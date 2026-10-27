@@ -32,3 +32,7 @@ venv/
 /checkpoints/
 /models/
 /.cache/
+
+# Private experiment entrypoints and tests stay on the server.
+/scripts/
+/tests/
