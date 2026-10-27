@@ -1,7 +1,16 @@
 # Controller package
 
-Các module lõi của adaptive latent handoff được gom ở đây. Các entrypoint
-`scripts/*.py`, YAML trong `configs/`, và tests vẫn giữ vị trí cũ.
+Các module lõi của adaptive latent handoff được gom ở đây. scripts/ và tests/
+chỉ giữ trên server, đã bỏ khỏi GitHub và ignore; YAML templates ở configs/.
+Một số module import helper từ scripts/, vì vậy clone GitHub không đủ để chạy
+workflow controller nội bộ.
+
+Kết quả cập nhật 27/10/2026 và các giới hạn suy luận đặt tại
+[bảng kết quả chính](../docs/README.md#verified-results). PPO cosine v8 đã xong 64
+iterations (test 69,6%); supervised 70,4% chưa chứng minh lợi ích chọn K.
+Các số này dùng hybrid embedding replay. Native Full KV/Selective KVComm và
+trạng thái các job mới được trình bày riêng trong docs, không đổi schema cũ.
+
 
 | Module | Vai trò |
 |---|---|
@@ -46,7 +55,7 @@ resume seed43/44 hoặc sửa hash cho qua kiểm tra. Cần migration/versioned
 có provenance trước khi tiếp tục job cũ, cùng việc xử lý đường dẫn server.
 
 Nguồn chụp cho run mới dùng `controller/*.py` và bao gồm `controller/__init__.py`.
-Xem [workflow/scripts](../scripts/README.md) và [tài liệu controller](../docs/README.md).
+Xem script map server-only scripts/README.md và [tài liệu controller](../docs/README.md).
 
 ## Cleanup entrypoints cũ
 

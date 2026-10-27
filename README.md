@@ -1,27 +1,89 @@
 # Adaptive latent handoff controller
 
-Research extension of [Gen-Verse/LatentMAS](https://github.com/Gen-Verse/LatentMAS).
-Two frozen Qwen3-4B agents perform latent reasoning (A) and answer generation (B).
-A controller chooses HANDOFF or CONTINUE at K=10,20,...,80; K80 forces handoff.
+Research extension of [Gen-Verse/LatentMAS](https://github.com/Gen-Verse/LatentMAS)
+using frozen Qwen3-4B sender A and receiver B. The controller experiments choose
+HANDOFF/CONTINUE at K10–80. Current comparisons also examine latent transforms
+and selective KV communication.
 
-- [Current controller design, analysis, evidence and operation](docs/README.md).
-- [Controller modules](controller/README.md).
-- [Scripts](scripts/README.md).
+**Execution default for new runs: HF native with direct Full KV A→B handoff.**
+Realignment transforms A's latent input; inter-agent communication passes
+past_key_values. Historical HF+vLLM embedding replay results have a different
+protocol. Read [the native-KV contract](docs/README.md#native-kv-contract) and
+[controller design and evidence](docs/README.md) before launching.
 
-Run from the repository root. The full CPU regression suite is
-`CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v`.
-Some tests require local MedQA exports, archived runs or a cached model tokenizer;
-see the publication notes before running on a fresh clone. Current schemas and verification notes are documented in
-[the three-group guide](docs/README.md).
+## Verified results — 27 October 2026
 
-Generated data, profiles, checkpoints and evaluation outputs are excluded by
-`.gitignore`; they are retained locally. Frozen experiment configurations and
-source snapshots describe their original execution environments. They require
-explicit migration before reuse on another machine.
+MedQA test500, strict boxed-answer scoring. This cohort has been used repeatedly;
+it is not an untouched final test. A single run does not establish a robust gain.
+
+### Matched native-HF communication comparison
+
+A K10, batch4, seed42, same cohort and decoder. The replay comparator also uses HF.
+
+| Handoff | Correct /500 | Accuracy | Measured total time (s) |
+|---|---:|---:|---:|
+| Embedding replay | 349 | 69.8% | 18931 |
+| Direct Full KV | 341 | 68.2% | 17099 |
+| Selective KVComm | 355 | 71.0% | 19622 |
+
+Selective KVComm saves 69.28% of prefix-cache bytes, but measured runtime is 14.76%
+longer than Full KV. Accuracy delta is +2.8 percentage points, with paired
+question-bootstrap 95% CI [-0.4, +6.0]. This does not yet establish a repeatable
+accuracy gain or an end-to-end speedup. Full-KV B decoding accounts for 99.35%
+of measured time; A accounts for 0.49%. Calibration overhead is reported separately
+in [the full results](docs/README.md#verified-results).
+
+### Historical controller and EMA results
+
+These runs used **hybrid HF+vLLM embedding replay**, not native Full KV.
+
+| Method | Test500 accuracy | Mean K |
+|---|---:|---:|
+| Fixed K10 reference | 69.6% | 10.00 |
+| PPO cosine64, validation-best iteration 32 | 69.6% | 23.22 |
+| GRPO C1 late fusion | 70.0% | 10.38 |
+| Supervised first-success C1 | 70.4% | 10.12 |
+
+The supervised controller still chooses K10 on 497/500 questions; the three changed
+budgets explain none of its net gain over the historical reference. The current
+evidence does not establish a controller that reliably outperforms fixed K10.
+
+EMA beta=0.05 has completed K10–80. In the fresh matched K40 comparison,
+Realignment scored 65.4% and EMA 67.8%; loops fell 20→1, while the accuracy
+interval still crosses zero. [Full K10–80, SRR, debate, stopping and Claude
+diagnostics](docs/README.md#verified-results) are separated by protocol.
+
+### Current job status at the snapshot
+
+- Selective A K10→B latent K0/K10 test500: 180 paired questions preserved; the
+  multi-GPU batch32/16 continuation is waiting for VRAM. No final 500-question result.
+- Native seven-K adaptive campaign: canceled by the user after 6 diagnostic
+  training questions; the dependent stages never ran.
+- A K2 shortcut distillation: not trained; still blocked by the canceled
+  native-profile prerequisite. Reusing historical labels has not been implemented.
+
+The train profile's adaptive-help group is 99/1024 questions under a ≥2/3-seed
+criterion. This is neither “K10 is correct on 90%” nor a promised 9.67-point gain.
+See [the data priority](docs/README.md#train-data-priority), observability diagnostics
+and [canonical research/operation guide](docs/README.md).
+
+## Published repository and server-only workflows
+
+scripts/ and tests/ are excluded from GitHub and ignored; their server copies,
+frozen job snapshots, raw results and checkpoints are preserved. Several controller
+modules import helpers from scripts/, so a GitHub clone alone cannot run the
+private controller training/evaluation workflow or internal regression suite.
+Module documentation is in [controller/README.md](controller/README.md);
+configuration templates are in [configs/README.md](configs/README.md).
+
+The latest server-only cleanup verification passed 306 tests with 1 historical skip.
+It is CPU regression evidence, not real-model GPU parity or experimental accuracy.
+Generated datasets, profiles, checkpoints, evaluation outputs and local credentials
+are also excluded. New runs require their own frozen configuration and runtime.
 
 The material below is the upstream LatentMAS README. Its paper results and
-performance claims concern the upstream framework; controller experiment
-results are documented separately.
+performance claims concern the upstream framework and are separate from the
+local results above.
 
 ---
 
@@ -56,9 +118,9 @@ Latent Collaboration in Multi-Agent Systems
 
 ## 💡 Introduction
 
-Local adaptive-handoff extension: core code is in [controller/](controller/README.md),
-CLI entrypoints remain in [scripts/](scripts/README.md), and the current research
-protocol is documented in [docs/](docs/README.md).
+Local adaptive-handoff extension: core code is in [controller/](controller/README.md)
+and verified research results are in [docs/](docs/README.md#verified-results).
+Experiment scripts and tests are maintained privately on the server.
 
 
 **LatentMAS** is a multi-agent reasoning framework that **moves agent collaboration from token space into the model’s latent space**.  
